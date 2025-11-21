@@ -1,5 +1,7 @@
 import { useState, useRef } from "react";
 import jsPDF from "jspdf";
+import Papa from "papaparse";
+import JSZip from "jszip";
 import "./App.css";
 
 function App() {
@@ -11,11 +13,14 @@ function App() {
   const [position, setPosition] = useState({ x: 20, y: 20 });
   const [dragging, setDragging] = useState(false);
 
+  // NEW: Batch processing state
+  const [batchMode, setBatchMode] = useState(false);
+  const [namesList, setNamesList] = useState<string[]>([]);
+  const [processing, setProcessing] = useState(false);
+
   const offset = useRef({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
-
-  // NEW — wrapper to capture full image + text
   const exportRef = useRef<HTMLDivElement>(null);
 
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -23,6 +28,39 @@ function App() {
       setFile(URL.createObjectURL(e.target.files[0]));
     } else {
       setFile(null);
+    }
+  }
+
+  // NEW: Handle CSV upload
+  function handleCSVUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    if (e.target.files && e.target.files.length > 0) {
+      const file = e.target.files[0];
+      Papa.parse(file, {
+        complete: (results) => {
+          // Extract names from first column, skip header
+          const names = results.data
+            .slice(1)
+            .map((row: any) => row[0])
+            .filter((name: string) => name && name.trim());
+          setNamesList(names);
+          setBatchMode(true);
+          setText(names.join(", "));
+        },
+        header: false,
+      });
+    }
+  }
+
+  // NEW: Handle comma-separated names
+  function handleNamesInput(value: string) {
+    setText(value);
+    if (value.includes(",")) {
+      const names = value.split(",").map((n) => n.trim()).filter((n) => n);
+      setNamesList(names);
+      setBatchMode(names.length > 1);
+    } else {
+      setBatchMode(false);
+      setNamesList([]);
     }
   }
 
@@ -62,9 +100,8 @@ function App() {
     setDragging(false);
   }
 
-
-  // Helper to create high-quality canvas with original image dimensions
-  async function createHighQualityCanvas() {
+  // Helper to create high-quality canvas with custom text
+  async function createHighQualityCanvas(customText?: string) {
     if (!file) return null;
 
     return new Promise<HTMLCanvasElement>((resolve, reject) => {
@@ -79,7 +116,7 @@ function App() {
 
         // Use original image dimensions
         canvas.width = img.width;
-        canvas.height = img.height;;
+        canvas.height = img.height;
 
         // Draw original image at full resolution
         ctx.drawImage(img, 0, 0);
@@ -95,11 +132,12 @@ function App() {
         const scale = img.width / displayedWidth;
 
         // Draw text at scaled position and size
+        const textToRender = customText || text;
         ctx.font = `bold ${fontSize * scale}px Arial`;
         ctx.fillStyle = color;
         ctx.shadowColor = "black";
         ctx.shadowBlur = 5 * scale;
-        ctx.fillText(text, position.x * scale, (position.y + fontSize) * scale);
+        ctx.fillText(textToRender, position.x * scale, (position.y + fontSize) * scale);
 
         resolve(canvas);
       };
@@ -108,49 +146,130 @@ function App() {
     });
   }
 
-  // 🎉 EXPORT AS PNG
+  // 🎉 EXPORT AS PNG (Single or Batch)
   async function downloadPNG() {
-    const canvas = await createHighQualityCanvas();
-    if (!canvas) return;
+    if (batchMode && namesList.length > 1) {
+      await downloadBatchPNG();
+    } else {
+      const canvas = await createHighQualityCanvas();
+      if (!canvas) return;
 
-    const dataURL = canvas.toDataURL("image/png");
-    const link = document.createElement("a");
-    link.href = dataURL;
-    link.download = "edited-image.png";
-    link.click();
+      const dataURL = canvas.toDataURL("image/png");
+      const link = document.createElement("a");
+      link.href = dataURL;
+      link.download = "edited-image.png";
+      link.click();
+    }
   }
 
-  // 🎉 EXPORT AS PDF
+  // 🎉 EXPORT AS PDF (Single or Batch)
   async function downloadPDF() {
-    const canvas = await createHighQualityCanvas();
-    if (!canvas) return;
+    if (batchMode && namesList.length > 1) {
+      await downloadBatchPDF();
+    } else {
+      const canvas = await createHighQualityCanvas();
+      if (!canvas) return;
 
-    const imgData = canvas.toDataURL("image/png");
+      const imgData = canvas.toDataURL("image/png");
 
-    // Determine orientation based on actual image dimensions
-    const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
+      // Determine orientation based on actual image dimensions
+      const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
 
-    const pdf = new jsPDF({
-      orientation: orientation,
-      unit: "px",
-      format: [canvas.width, canvas.height],
-    });
+      const pdf = new jsPDF({
+        orientation: orientation,
+        unit: "px",
+        format: [canvas.width, canvas.height],
+      });
 
-    pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
-    pdf.save("edited-image.pdf");
+      pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+      pdf.save("edited-image.pdf");
+    }
+  }
+
+  // NEW: Download all certificates as PNG in a ZIP file
+  async function downloadBatchPNG() {
+    setProcessing(true);
+    const zip = new JSZip();
+
+    for (let i = 0; i < namesList.length; i++) {
+      const name = namesList[i];
+      const canvas = await createHighQualityCanvas(name);
+      if (!canvas) continue;
+
+      const dataURL = canvas.toDataURL("image/png");
+      const base64Data = dataURL.split(",")[1];
+      zip.file(`certificate_${name.replace(/\s+/g, "_")}.png`, base64Data, {
+        base64: true,
+      });
+    }
+
+    const content = await zip.generateAsync({ type: "blob" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(content);
+    link.download = "certificates.zip";
+    link.click();
+    setProcessing(false);
+  }
+
+  // NEW: Download all certificates as PDF in a ZIP file
+  async function downloadBatchPDF() {
+    setProcessing(true);
+    const zip = new JSZip();
+
+    for (let i = 0; i < namesList.length; i++) {
+      const name = namesList[i];
+      const canvas = await createHighQualityCanvas(name);
+      if (!canvas) continue;
+
+      const imgData = canvas.toDataURL("image/png");
+      const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
+
+      const pdf = new jsPDF({
+        orientation: orientation,
+        unit: "px",
+        format: [canvas.width, canvas.height],
+      });
+
+      pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+      const pdfBlob = pdf.output("blob");
+      zip.file(`certificate_${name.replace(/\s+/g, "_")}.pdf`, pdfBlob);
+    }
+
+    const content = await zip.generateAsync({ type: "blob" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(content);
+    link.download = "certificates.zip";
+    link.click();
+    setProcessing(false);
   }
 
   return (
-    <div className="App">
+    <div style={{ padding: "20px", fontFamily: "Arial, sans-serif" }}>
+      <h1>Certificate Generator</h1>
+      
       <h2>Upload Image</h2>
-      <input type="file" onChange={handleChange} />
+      <input type="file" onChange={handleChange} accept="image/*" />
 
-      <h2>Add Text</h2>
+      <h2>Add Text (or Names separated by comma)</h2>
       <input
         type="text"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => handleNamesInput(e.target.value)}
+        placeholder="e.g., John, Ali, Sarah"
+        style={{ width: "300px", padding: "8px" }}
       />
+
+      <h2>Or Upload CSV File (names in first column)</h2>
+      <input type="file" onChange={handleCSVUpload} accept=".csv" />
+
+      {batchMode && namesList.length > 1 && (
+        <div style={{ margin: "10px 0", padding: "10px", background: "#e3f2fd", borderRadius: "5px", maxWidth: "500px" }}>
+          <strong>Batch Mode Active:</strong> {namesList.length} certificates will be generated
+          <div style={{ marginTop: "5px", fontSize: "14px" }}>
+            Names: {namesList.join(", ")}
+          </div>
+        </div>
+      )}
 
       <h2>Font Size</h2>
       <input
@@ -160,6 +279,7 @@ function App() {
         value={fontSize}
         onChange={(e) => setFontSize(Number(e.target.value))}
       />
+      <span style={{ marginLeft: "10px" }}>{fontSize}px</span>
 
       <h2>Font Color</h2>
       <input
@@ -168,13 +288,25 @@ function App() {
         onChange={(e) => setColor(e.target.value)}
       />
 
-      <button onClick={downloadPNG} style={{ marginRight: "10px" }}>
-        Download PNG
-      </button>
+      <div style={{ marginTop: "20px" }}>
+        <button 
+          onClick={downloadPNG} 
+          style={{ marginRight: "10px", padding: "10px 20px", cursor: processing ? "not-allowed" : "pointer" }} 
+          disabled={processing}
+        >
+          {processing ? "Processing..." : batchMode && namesList.length > 1 ? "Download All PNG (ZIP)" : "Download PNG"}
+        </button>
 
-      <button onClick={downloadPDF}>Download PDF</button>
+        <button 
+          onClick={downloadPDF} 
+          style={{ padding: "10px 20px", cursor: processing ? "not-allowed" : "pointer" }}
+          disabled={processing}
+        >
+          {processing ? "Processing..." : batchMode && namesList.length > 1 ? "Download All PDF (ZIP)" : "Download PDF"}
+        </button>
+      </div>
 
-      {/* Image + text container (captured by html2canvas) */}
+      {/* Image + text container */}
       <div
         ref={exportRef}
         style={{
@@ -195,7 +327,7 @@ function App() {
               <img
                 src={file}
                 alt="Preview"
-                style={{ width: "300px", borderRadius: "8px" }}
+                style={{ width: "500px", borderRadius: "8px", display: "block" }}
               />
 
               <div
@@ -214,7 +346,7 @@ function App() {
                   whiteSpace: "nowrap",
                 }}
               >
-                {text}
+                {batchMode && namesList.length > 0 ? namesList[0] : text}
               </div>
             </>
           )}
