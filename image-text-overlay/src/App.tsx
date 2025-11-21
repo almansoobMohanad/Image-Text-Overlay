@@ -1,35 +1,227 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+import { useState, useRef } from "react";
+import jsPDF from "jspdf";
+import "./App.css";
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [file, setFile] = useState<string | null>(null);
+  const [text, setText] = useState("Your Text");
+  const [fontSize, setFontSize] = useState(24);
+  const [color, setColor] = useState("#ffffff");
+
+  const [position, setPosition] = useState({ x: 20, y: 20 });
+  const [dragging, setDragging] = useState(false);
+
+  const offset = useRef({ x: 0, y: 0 });
+  const containerRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
+
+  // NEW — wrapper to capture full image + text
+  const exportRef = useRef<HTMLDivElement>(null);
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    if (e.target.files && e.target.files.length > 0) {
+      setFile(URL.createObjectURL(e.target.files[0]));
+    } else {
+      setFile(null);
+    }
+  }
+
+  function handleMouseDown(e: React.MouseEvent) {
+    setDragging(true);
+    offset.current = {
+      x: e.clientX - position.x,
+      y: e.clientY - position.y,
+    };
+  }
+
+  function handleMouseMove(e: React.MouseEvent) {
+    if (!dragging) return;
+
+    const container = containerRef.current;
+    const textBox = textRef.current;
+    if (!container || !textBox) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const textRect = textBox.getBoundingClientRect();
+
+    let newX = e.clientX - offset.current.x;
+    let newY = e.clientY - offset.current.y;
+
+    const minX = 0;
+    const minY = 0;
+    const maxX = containerRect.width - textRect.width;
+    const maxY = containerRect.height - textRect.height;
+
+    newX = Math.max(minX, Math.min(newX, maxX));
+    newY = Math.max(minY, Math.min(newY, maxY));
+
+    setPosition({ x: newX, y: newY });
+  }
+
+  function handleMouseUp() {
+    setDragging(false);
+  }
+
+
+  // Helper to create high-quality canvas with original image dimensions
+  async function createHighQualityCanvas() {
+    if (!file) return null;
+
+    return new Promise<HTMLCanvasElement>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("Could not get canvas context"));
+          return;
+        }
+
+        // Use original image dimensions
+        canvas.width = img.width;
+        canvas.height = img.height;;
+
+        // Draw original image at full resolution
+        ctx.drawImage(img, 0, 0);
+
+        // Calculate scale factor (original vs displayed)
+        const container = containerRef.current;
+        if (!container) {
+          reject(new Error("Container not found"));
+          return;
+        }
+        const containerRect = container.getBoundingClientRect();
+        const displayedWidth = containerRect.width;
+        const scale = img.width / displayedWidth;
+
+        // Draw text at scaled position and size
+        ctx.font = `bold ${fontSize * scale}px Arial`;
+        ctx.fillStyle = color;
+        ctx.shadowColor = "black";
+        ctx.shadowBlur = 5 * scale;
+        ctx.fillText(text, position.x * scale, (position.y + fontSize) * scale);
+
+        resolve(canvas);
+      };
+      img.onerror = reject;
+      img.src = file;
+    });
+  }
+
+  // 🎉 EXPORT AS PNG
+  async function downloadPNG() {
+    const canvas = await createHighQualityCanvas();
+    if (!canvas) return;
+
+    const dataURL = canvas.toDataURL("image/png");
+    const link = document.createElement("a");
+    link.href = dataURL;
+    link.download = "edited-image.png";
+    link.click();
+  }
+
+  // 🎉 EXPORT AS PDF
+  async function downloadPDF() {
+    const canvas = await createHighQualityCanvas();
+    if (!canvas) return;
+
+    const imgData = canvas.toDataURL("image/png");
+
+    // Determine orientation based on actual image dimensions
+    const orientation = canvas.width > canvas.height ? "landscape" : "portrait";
+
+    const pdf = new jsPDF({
+      orientation: orientation,
+      unit: "px",
+      format: [canvas.width, canvas.height],
+    });
+
+    pdf.addImage(imgData, "PNG", 0, 0, canvas.width, canvas.height);
+    pdf.save("edited-image.pdf");
+  }
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div className="App">
+      <h2>Upload Image</h2>
+      <input type="file" onChange={handleChange} />
+
+      <h2>Add Text</h2>
+      <input
+        type="text"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+
+      <h2>Font Size</h2>
+      <input
+        type="range"
+        min="10"
+        max="80"
+        value={fontSize}
+        onChange={(e) => setFontSize(Number(e.target.value))}
+      />
+
+      <h2>Font Color</h2>
+      <input
+        type="color"
+        value={color}
+        onChange={(e) => setColor(e.target.value)}
+      />
+
+      <button onClick={downloadPNG} style={{ marginRight: "10px" }}>
+        Download PNG
+      </button>
+
+      <button onClick={downloadPDF}>Download PDF</button>
+
+      {/* Image + text container (captured by html2canvas) */}
+      <div
+        ref={exportRef}
+        style={{
+          position: "relative",
+          marginTop: "20px",
+          display: "inline-block",
+        }}
+      >
+        {/* Drag area */}
+        <div
+          ref={containerRef}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          style={{ position: "relative" }}
+        >
+          {file && (
+            <>
+              <img
+                src={file}
+                alt="Preview"
+                style={{ width: "300px", borderRadius: "8px" }}
+              />
+
+              <div
+                ref={textRef}
+                onMouseDown={handleMouseDown}
+                style={{
+                  position: "absolute",
+                  top: position.y,
+                  left: position.x,
+                  color: color,
+                  fontSize: fontSize,
+                  fontWeight: "bold",
+                  textShadow: "0px 0px 5px black",
+                  cursor: "grab",
+                  userSelect: "none",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {text}
+              </div>
+            </>
+          )}
+        </div>
       </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+    </div>
+  );
 }
 
-export default App
+export default App;
